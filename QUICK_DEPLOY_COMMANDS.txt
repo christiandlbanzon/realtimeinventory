@@ -1,0 +1,66 @@
+================================================================================
+QUICK DEPLOYMENT COMMANDS FOR VM
+================================================================================
+
+VM: real-time-inventory
+Zone: us-central1-b
+Project: boxwood-chassis-332307
+
+================================================================================
+STEP 1: SSH INTO VM
+================================================================================
+1. Go to: https://console.cloud.google.com/compute/instances?project=boxwood-chassis-332307
+2. Click SSH button next to "real-time-inventory"
+
+================================================================================
+STEP 2: SET UP USER AND DEPENDENCIES
+================================================================================
+Run these commands in the SSH terminal:
+
+sudo useradd -m -s /bin/bash banzo
+sudo mkdir -p /home/banzo
+sudo chown -R banzo:banzo /home/banzo
+sudo apt-get update -y
+sudo apt-get install -y python3 python3-pip git
+sudo pip3 install --upgrade pip
+sudo pip3 install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client requests python-dotenv fuzzywuzzy python-Levenshtein
+sudo su - banzo
+cd /home/banzo
+
+================================================================================
+STEP 3: COPY FILES
+================================================================================
+Option A: Use file upload in SSH terminal (if available)
+- Look for "Upload file" button in the SSH terminal
+- Upload: vm_inventory_updater_fixed.py
+- Upload: clover_creds.json  
+- Upload: service-account-key.json
+
+Option B: Copy-paste file contents
+I'll provide the file contents separately - they're too large for this file.
+
+================================================================================
+STEP 4: SET UP CRON JOB
+================================================================================
+Run this command:
+
+(crontab -l 2>/dev/null | grep -v "vm_inventory_updater.py"; echo "*/5 * * * * cd /home/banzo && /usr/bin/python3 /home/banzo/vm_inventory_updater.py >> /home/banzo/inventory_cron.log 2>&1") | crontab -
+
+Verify cron is set:
+crontab -l
+
+================================================================================
+STEP 5: TEST
+================================================================================
+Run manually to test:
+cd /home/banzo
+python3 /home/banzo/vm_inventory_updater.py
+
+Check logs:
+tail -f /home/banzo/inventory_cron.log
+
+================================================================================
+NOTE: Since gcloud has permission issues, manual SSH deployment is the most
+reliable method right now. The files are ready - you just need to copy them
+into the VM via the SSH terminal.
+================================================================================
