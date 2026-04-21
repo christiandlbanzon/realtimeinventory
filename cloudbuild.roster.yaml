@@ -1,0 +1,12 @@
+# Build roster sync image (Dockerfile.roster; gcloud builds submit has no -f flag)
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-f'
+      - 'Dockerfile.roster'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/inventory-roster-sync'
+      - '.'
+images:
+  - 'gcr.io/$PROJECT_ID/inventory-roster-sync'

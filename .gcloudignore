@@ -1,0 +1,11 @@
+# Only include files needed for Docker build
+*
+!Dockerfile
+!Dockerfile.roster
+!cloudbuild.roster.yaml
+!vm_inventory_updater_fixed.py
+!sync_cookie_roster_from_clover.py
+!sync_roster_job.py
+!sync_roster_week_job.py
+!clover_creds.json
+!service-account-key.json

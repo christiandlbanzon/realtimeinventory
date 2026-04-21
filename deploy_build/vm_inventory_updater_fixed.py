@@ -2099,13 +2099,9 @@ def update_inventory_sheet(sales_data, target_date=None, clover_creds=None):
                                 logging.error(f"❌ Available cookie names: {cookie_names[:5]}...")
                     
                     # Clear rows NOT in Clover cookie category (M, Q, R - bucket hat, cortado, macchiato)
-                    # Only clear rows in the MAIN data grid (rows 3-18), not closing inventory or other sections
+                    # Only clear rows that look like cookie flavor rows (X - Name or *X* Name), not section headers
                     if allowed_sheet_names:
                         for i, sheet_cookie in enumerate(cookie_names):
-                            cookie_row = i + 3
-                            # Only process main grid rows 3-18 (16 cookie slots + spacers)
-                            if cookie_row > 18:
-                                break
                             if not sheet_cookie or '[NOT IN USE]' in str(sheet_cookie).upper():
                                 continue
                             sc = str(sheet_cookie).strip()
@@ -2117,12 +2113,21 @@ def update_inventory_sheet(sales_data, target_date=None, clover_creds=None):
                                 continue
                             cleaned = clean_cookie_name(sheet_cookie)
                             if cleaned not in allowed_sheet_names:
-                                # Clear Live Sales Data column only (never touch Expected Live Inventory - it has formulas)
+                                cookie_row = i + 3
+                                # Clear Live Sales Data column
                                 cell_range = _a1_sheet_range(sheet_tab, f"{column_to_letter(col_idx)}{cookie_row}")
                                 if cell_range not in updates_by_cell:
                                     updates.append({'range': cell_range, 'values': [[0]]})
                                     updates_by_cell[cell_range] = 0
                                     logging.info(f"🧹 Cleared {sheet_cookie} (not in Clover cookie category) at {cell_range}")
+                                # Also clear Expected Live Inventory column (red 999 column)
+                                exp_col = expected_inventory_columns.get(sheet_location)
+                                if exp_col is not None:
+                                    exp_cell = _a1_sheet_range(sheet_tab, f"{column_to_letter(exp_col)}{cookie_row}")
+                                    if exp_cell not in updates_by_cell:
+                                        updates.append({'range': exp_cell, 'values': [[0]]})
+                                        updates_by_cell[exp_cell] = 0
+                                        logging.info(f"🧹 Cleared Expected Live Inventory for {sheet_cookie} at {exp_cell}")
                                 # Column A stays as-is; roster sync sets names / [NOT IN USE].
                     
                     # Do NOT write totals to Live Sales Data - leave totals row blank per user request
@@ -2444,8 +2449,8 @@ def clean_cookie_name(api_name):
         "*L* S'mores": "L - S'mores",
         "*M* Birthday Cake": "M - Birthday Cake",
         "*M* Birthday Cake ": "M - Birthday Cake",
-        "*M* Dubai Chocolate": "M - Dubai Chocolate",
-        "*M* Dubai Chocolate ": "M - Dubai Chocolate",
+        "*M* Dubai Chocolate": "M - Birthday Cake",  # legacy Clover item name
+        "*M* Dubai Chocolate ": "M - Birthday Cake",
         "*N* Cheesecake with Biscoff": "N - Cheesecake with Biscoff",
         "*N* Cheesecake with Biscoff ": "N - Cheesecake with Biscoff",
     }
@@ -2561,8 +2566,8 @@ def clean_cookie_name(api_name):
         "*L* S'mores": "L - S'mores",
         "*M* Birthday Cake": "M - Birthday Cake",
         "*M* Birthday Cake ": "M - Birthday Cake",
-        "*M* Dubai Chocolate": "M - Dubai Chocolate",
-        "*M* Dubai Chocolate ": "M - Dubai Chocolate",
+        "*M* Dubai Chocolate": "M - Birthday Cake",  # legacy Clover item name
+        "*M* Dubai Chocolate ": "M - Birthday Cake",
         
         # Montehiedra API names with trailing spaces (actual API format)
         "*A* Chocolate Chip Nutella ": "A - Chocolate Chip Nutella",
@@ -2595,8 +2600,8 @@ def clean_cookie_name(api_name):
         "*L* S'mores": "L - S'mores",
         "*M* Birthday Cake": "M - Birthday Cake",
         "*M* Birthday Cake ": "M - Birthday Cake",
-        "*M* Dubai Chocolate": "M - Dubai Chocolate",
-        "*M* Dubai Chocolate ": "M - Dubai Chocolate",
+        "*M* Dubai Chocolate": "M - Birthday Cake",  # legacy Clover item name
+        "*M* Dubai Chocolate ": "M - Birthday Cake",
         
         # Exact matches (fallback for old format)
         "S'mores": "L - S'mores",
@@ -2618,8 +2623,8 @@ def clean_cookie_name(api_name):
         "Strawberry Cheesecake": "K - Strawberry Cheesecake",
         "Vanilla Coconut Cream": "K - Vanilla Coconut Cream",
         "Birthday Cake": "M - Birthday Cake",
-        "Dubai Chocolate": "Dubai Chocolate",
-        "M - Dubai Chocolate": "M - Dubai Chocolate",
+        "Dubai Chocolate": "M - Birthday Cake",  # legacy item name
+        "M - Dubai Chocolate": "M - Birthday Cake",
         "Sticky Toffee Pudding": "G - Sticky Toffee Pudding",
         "Sticky Toffee": "G - Sticky Toffee Pudding",
         "G - Sticky Toffee Pudding": "G - Sticky Toffee Pudding",

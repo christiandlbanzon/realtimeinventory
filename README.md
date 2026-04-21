@@ -1,140 +1,132 @@
-# Real-Time Inventory Updater 🍪
+# Drunken Cookies — Real-Time Inventory System 🍪
 
-This system fetches current sales data from Clover and Shopify APIs and updates the "Sold as of NOW" columns in your inventory Google Sheet in real-time.
+Automated system that syncs Clover POS sales data into Google Sheets every 5 minutes. Powers the PAR (baking forecast) sheets used by the production team.
 
-## 🎯 What It Does
+---
 
-- **Fetches recent sales** from Clover and Shopify (last 1 hour by default)
-- **Maps cookie names** from APIs to inventory sheet names
-- **Updates "Sold as of NOW" columns** for each location
-- **Runs continuously** every 15 minutes (or custom interval)
-- **Handles multiple locations** (San Patricio, Plaza del Sol, Plaza Las Americas, Old San Juan)
+## Architecture
 
-## 🚀 Quick Start
-
-### 1. Test Run (Once)
-```bash
-python inventory_updater.py --once
+```
+┌──────────────┐       ┌─────────────────┐       ┌──────────────────┐
+│  Clover POS  │──────▶│ inventory-      │──────▶│  Google Sheets   │
+│  (6 stores)  │       │ updater         │       │  (Mall PARs,     │
+│              │       │ (every 5 min)   │       │   Dispatch PARs, │
+└──────────────┘       └─────────────────┘       │   Morning PARs)  │
+                                                  └──────────────────┘
+                                                          │
+                              ┌───────────────────────────┘
+                              ▼
+                       ┌──────────────┐
+                       │   Drunken    │
+                       │  Cookies DB  │◀── historical data used for
+                       │   (Sheet)    │    4-week median PAR forecasts
+                       └──────────────┘
 ```
 
-### 2. Continuous Updates (15 minutes)
+---
+
+## Deployed Cloud Run Jobs
+
+| Job | Schedule | Purpose |
+|-----|----------|---------|
+| `inventory-updater` | Every 5 min | Pull Clover sales → write to Mall PARs + Drunken Cookies |
+| `daily-sales-automation` | Daily 6 AM PR | End-of-day sales summary |
+| `shopify-twice-daily` | 6 PM + midnight UTC | Shopify online orders → Dispatch PARs |
+| `inventory-roster-sync` | **Manual only** | Update cookie roster when menu changes |
+
+---
+
+## Key Files
+
+| File | What it does |
+|------|--------------|
+| `vm_inventory_updater_fixed.py` | Main inventory updater — Clover API → Sheets |
+| `sync_cookie_roster_from_clover.py` | Updates cookie name labels (A–N) when menu changes |
+| `sync_roster_week_job.py` | Weekly roster sync (writes tomorrow + next 7 days) |
+| `sync_roster_job.py` | Single-day roster sync helper |
+| `Dockerfile` | Inventory updater container |
+| `Dockerfile.roster` | Roster sync container |
+
+---
+
+## Locations
+
+| Store | Clover Merchant ID | Mall PARs column | Drunken Cookies tab |
+|-------|--------------------|--------------------| --------------------|
+| San Patricio | Y3JSKHZKVKYM1 | F | San Patricio |
+| Plaza del Sol | J14BXNH1WDT71 | T | PlazaSol |
+| Montehiedra | FNK14Z5E7CAA1 | AH | Montehiedra |
+| Plaza Carolina | S322BTDA07H71 | AV | Plaza Carolina |
+| Plaza Las Americas | 3YCBMZQ6SFT71 | BJ | Plaza |
+| Old San Juan (VSJ) | QJD3EASTRDBX1 | BU | VSJ |
+
+---
+
+## Google Sheets
+
+| Sheet | ID | What it shows |
+|-------|-------|---------------|
+| Mall PARs (April 2026) | `1C5_N8oHds9Xw9pqN5PptGAVHJ2WeKrh35PCiejusl88` | Live sales + inventory per store |
+| Dispatch PARs | `1XC9o3iGhv2YWAXZqnDwz0bxA1N4kJKkn_fswiz7X6ek` | Tomorrow's bake forecast per store |
+| Morning PARs | `1BbZc3DYa3r0aCR2jiwm6ecs7cs7v4IRO39nHFIYR1oc` | VSJ morning production list |
+| Drunken Cookies (database) | `1OrhmZgQRbMpzewqvdQd6Wipv-sIC4s1gEw9aJO-ldgE` | Historical sales (source of truth) |
+
+---
+
+## How the PAR Formula Works
+
+For each cookie at each store on a given day:
+
+1. **Try 4-week median** — look at the same day + next day for 4 weeks back, sum each pair, take median
+2. **If only 1 week of data** → use that week's value
+3. **If 2+ weeks** → median of available weeks
+4. **If brand new cookie (0 weeks)** →
+   - Mon/Tue/Wed: use yesterday's actual sales
+   - Thu/Fri/Sat/Sun: use standard table (15/15/10/5 for small stores, 30/30/30/20 for Plaza Las Americas, 48 for VSJ)
+
+---
+
+## Common Operations
+
+### Run inventory-updater manually
 ```bash
-python inventory_updater.py
+gcloud run jobs execute inventory-updater --region=us-east1
 ```
 
-### 3. Custom Settings
+### Run roster sync when menu changes
 ```bash
-# Update every 5 minutes (300 seconds)
-python inventory_updater.py --interval 300
-
-# Fetch last 2 hours of data
-python inventory_updater.py --hours 2
-
-# Update every minute
-python inventory_updater.py --interval 60
+gcloud run jobs execute inventory-roster-sync --region=us-east1
 ```
 
-## 📊 Cookie Mapping
+### Rebuild and deploy inventory-updater
+```bash
+gcloud builds submit --tag gcr.io/boxwood-chassis-332307/inventory-updater
+gcloud run jobs update inventory-updater --region=us-east1 --image=gcr.io/boxwood-chassis-332307/inventory-updater:latest
+```
 
-The system maps cookie names from your APIs to the inventory sheet:
+### Rebuild and deploy roster sync
+```bash
+gcloud builds submit --config=cloudbuild.roster.yaml
+gcloud run jobs update inventory-roster-sync --region=us-east1 --image=gcr.io/boxwood-chassis-332307/inventory-roster-sync:latest
+```
 
-| API Name | Inventory Sheet Name |
-|----------|---------------------|
-| Chocolate Chip Nutella | A - Chocolate Chip Nutella |
-| Signature Chocolate Chip | B - Signature Chocolate Chip |
-| Cookies & Cream | C - Cookies & Cream |
-| White Chocolate Macadamia | D - White Chocolate Macadamia |
-| Churro With Dulce de Leche | E - Churro with Dulce De Leche |
-| Cheesecake with Biscoff | F - Cheesecake with Biscoff |
-| Rocky Road | G - Rocky Road |
-| Pecan Pie | H - Pecan Pie |
-| Tres Leches | I - Tres Leches |
-| Fudge Brownie | J - Fudge Brownie |
-| Strawberry Cheesecake | K - Strawberry Cheesecake |
-| S'mores | L - S'mores |
-| Ube with Oreo | M - Ube with Oreo |
-| Midnight Nutella | N - Midnight Nutella |
+---
 
-## 📍 Location Mapping
+## Credentials (not in git)
 
-| API Location | Inventory Sheet Location |
-|--------------|-------------------------|
-| VSJ | San Patricio |
-| San Patricio | San Patricio |
-| Plaza Del Sol | Plaza del Sol |
-| Plaza Las Americas | Plaza Las Americas |
-| Old San Juan | Old San Juan |
+- `clover_creds.json` — Clover API tokens per store
+- `service-account-key.json` — Google service account for Sheets access
 
-## ⚙️ Configuration
+These are loaded into the Docker images at build time and stored as GCP secrets.
 
-### Google Sheet ID
-The system is configured to update: `1zR0tPkqxMOijgQsmjLvg0cN2MlUuHlCB5VgNbNv3grU`
+---
 
-### Sheet Tab Format
-Uses date format: `9-1` for September 1st
+## Key Fixes Applied
 
-### Update Intervals
-- **San Patricio**: Every 15 minutes
-- **Plaza del Sol**: Every 1 minute  
-- **Plaza Las Americas**: Every 1 minute
-- **Old San Juan**: Every 1 minute
-
-## 🔧 Setup
-
-1. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-2. **Ensure credentials exist**:
-   - `../secrets/clover_creds.json`
-   - `../secrets/shopify_creds.json`
-   - `../secrets/google_creds.json`
-
-3. **First run will prompt for Google OAuth**
-
-## 📈 How It Works
-
-1. **Fetches orders** from Clover and Shopify APIs
-2. **Counts cookies sold** in the specified time period
-3. **Maps to inventory sheet** cookie names and locations
-4. **Updates "Sold as of NOW" columns** in the Google Sheet
-5. **Waits for next interval** and repeats
-
-## 🛠️ Troubleshooting
-
-### Common Issues
-
-1. **"No data found in sheet tab"**
-   - Check if the sheet tab exists (e.g., "9-1" for September 1st)
-   - Ensure the tab name matches the current date format
-
-2. **"Location not found in sheet"**
-   - Verify location mapping in the code
-   - Check if location names match exactly
-
-3. **"Error fetching orders"**
-   - Check API credentials
-   - Verify network connectivity
-   - Check API rate limits
-
-### Logs
-The system provides detailed logging:
-- ✅ Successful updates
-- ❌ Errors and retries
-- 📊 Sales data summary
-- ⏰ Next update timing
-
-## 🔄 Integration with Daily Reports
-
-This real-time system works alongside your daily reports:
-- **Real-time**: Updates "Sold as of NOW" columns every 15 minutes/1 minute
-- **Daily**: Your existing system runs at 12:01 AM for complete daily summaries
-
-Both systems can run simultaneously without conflicts!
-
-
-
-
-
-
+- **Dubai Chocolate mapping** — removed hardcoded `Dubai Chocolate → Birthday Cake` rule
+- **Expected Live Inventory formulas** — updater no longer overwrites these with hardcoded 0
+- **NOT IN USE rows** — cleaned of stale template values on tabs 4-8 through 4-30
+- **Sheets API retry** — 429 rate limit handling with exponential backoff
+- **Morning PARs formula** — progressive median (1 week, 2 weeks, 3 weeks, 4 weeks) with proper fallback table
+- **Dispatch PARs formula** — same progressive median logic + day-of-week fallback
+- **Drunken Cookies database** — append-only column policy, never rename existing headers
