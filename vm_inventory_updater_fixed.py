@@ -142,6 +142,7 @@ def main():
         # Check if FOR_DATE is set (for backfill) - use it if present, otherwise use normal logic
         tz = ZoneInfo("America/Puerto_Rico")
         for_date = os.getenv('FOR_DATE')
+        backfill_yesterday = os.getenv('BACKFILL_YESTERDAY', '').lower() in ('1', 'true', 'yes')
         if for_date:
             try:
                 target_date_obj = datetime.strptime(for_date, '%Y-%m-%d').date()
@@ -149,6 +150,11 @@ def main():
             except ValueError:
                 logging.warning(f"⚠️ Invalid FOR_DATE format: {for_date}. Using normal date logic.")
                 target_date_obj = get_target_date_for_processing()
+        elif backfill_yesterday:
+            # Dedicated yesterday-backfill mode (used by 2 AM PR scheduled job)
+            # Catches orders finalized after midnight that the regular updater missed
+            target_date_obj = datetime.now(tz).date() - timedelta(days=1)
+            logging.info(f"🌙 BACKFILL_YESTERDAY mode: processing {target_date_obj}")
         else:
             # Get target date using midnight logic (normal operation)
             target_date_obj = get_target_date_for_processing()
@@ -1002,14 +1008,19 @@ def fetch_clover_sales(creds, target_date=None):
         orders_data = response.json()
         orders = orders_data.get('elements', [])
         
-        # Handle pagination - Clover API may return more than 1000 orders
-        # Check if there are more results and fetch them
+        # Handle pagination - Clover API may return more than 1000 orders.
+        # NOTE: Clover does NOT return a 'hasMore' field (Square/Stripe convention only).
+        # Paginate while the previous page was full (== page_size); stop when a page
+        # returns fewer than page_size orders. Without this fix busy stores (VSJ,
+        # Plaza Carolina, Plaza Las Americas) had their earliest-of-day sales truncated.
+        page_size = 1000
         offset = len(orders)
-        while orders_data.get('hasMore', False) and offset < 10000:  # Safety limit
+        last_page_size = len(orders)
+        while last_page_size >= page_size and offset < 10000:  # Safety cap
             params_paginated = params.copy()
             params_paginated['offset'] = offset
             logging.info(f"📄 Fetching more orders (offset: {offset})...")
-            
+
             paginated_response = smart_retry_request(
                 orders_url,
                 headers={},
@@ -1017,14 +1028,14 @@ def fetch_clover_sales(creds, target_date=None):
                 max_retries=2,
                 base_delay=2.0
             )
-            
+
             if paginated_response.status_code == 200:
                 paginated_data = paginated_response.json()
                 paginated_orders = paginated_data.get('elements', [])
                 orders.extend(paginated_orders)
-                offset += len(paginated_orders)
-                orders_data = paginated_data
-                logging.info(f"📄 Fetched {len(paginated_orders)} more orders (total: {len(orders)})")
+                last_page_size = len(paginated_orders)
+                offset += last_page_size
+                logging.info(f"📄 Fetched {last_page_size} more orders (total: {len(orders)})")
             else:
                 logging.warning(f"⚠️ Pagination request failed: {paginated_response.status_code}")
                 break
@@ -1158,7 +1169,7 @@ def fetch_clover_sales(creds, target_date=None):
                     'state': order_state,
                     'created_time': order_time,
                     'items': brookie_items,
-                    'will_process': order_state in ['locked', 'paid', 'open', 'completed', 'closed']
+                    'will_process': str(order_state).lower() in ['locked', 'paid', 'open', 'completed', 'closed']
                 })
         
         # Log all Brookie orders found
@@ -1181,7 +1192,7 @@ def fetch_clover_sales(creds, target_date=None):
             order_state = order.get('state', '')
             order_id = order.get('id', 'Unknown')
             
-            if order_state in ['locked', 'paid', 'open', 'completed', 'closed']:
+            if str(order_state).lower() in ['locked', 'paid', 'open', 'completed', 'closed']:
                 
                 # Order-level keyword gate ONLY when category fetch failed (empty allowed_item_ids).
                 # When we have Clover category IDs, each line is filtered by item_id in allowed_item_ids — never skip whole orders by name keywords (that missed *G* Sticky Toffee, *K* Vanilla Coconut Cream, etc.).
@@ -2099,7 +2110,14 @@ def update_inventory_sheet(sales_data, target_date=None, clover_creds=None):
                                 logging.error(f"❌ Available cookie names: {cookie_names[:5]}...")
                     
                     # Clear rows NOT in Clover cookie category (M, Q, R - bucket hat, cortado, macchiato)
-                    # Only clear rows in the MAIN data grid (rows 3-18), not closing inventory or other sections
+                    # Only clear rows in the MAIN data grid (rows 3-18), not closing inventory or other sections.
+                    # Compare by LETTER slot, not full name, to avoid false positives when sheet uses
+                    # "and" and Clover uses "&" (e.g. "P - Black and White" vs "P - Black & White").
+                    allowed_letters = set()
+                    for nm in allowed_sheet_names:
+                        m = re.match(r'^\s*([A-Za-z])\s*-', nm)
+                        if m:
+                            allowed_letters.add(m.group(1).upper())
                     if allowed_sheet_names:
                         for i, sheet_cookie in enumerate(cookie_names):
                             cookie_row = i + 3
@@ -2115,8 +2133,10 @@ def update_inventory_sheet(sales_data, target_date=None, clover_creds=None):
                             # Only clear rows that look like flavor rows: "X - Name" or "*X* Name"
                             if not (re.match(r'^[A-Z]\s*-\s*', sc) or re.match(r'^\*[A-Z]\*', sc)):
                                 continue
-                            cleaned = clean_cookie_name(sheet_cookie)
-                            if cleaned not in allowed_sheet_names:
+                            # Extract sheet letter and compare against Clover's letter set
+                            mletter = re.match(r'^\*?\s*([A-Za-z])', sc)
+                            sheet_letter = mletter.group(1).upper() if mletter else None
+                            if sheet_letter and sheet_letter not in allowed_letters:
                                 # Clear Live Sales Data column only (never touch Expected Live Inventory - it has formulas)
                                 cell_range = _a1_sheet_range(sheet_tab, f"{column_to_letter(col_idx)}{cookie_row}")
                                 if cell_range not in updates_by_cell:
@@ -2410,7 +2430,15 @@ def clean_cookie_name(api_name):
     
     # Remove special characters and prefixes
     cleaned = api_name.strip()
-    
+
+    # FAST PATH: if the input is already in canonical sheet format "X - Flavor Name",
+    # return it as-is. Avoids the obsolete substring name_mapping below remapping
+    # current-menu labels (e.g. "E - Strawberry Cheesecake") to old-menu labels
+    # (e.g. "K - Strawberry Cheesecake"), which caused the validation loop to clear
+    # the row every backfill run. Added 2026-05-10.
+    if re.match(r'^[A-Z]\s-\s[A-Za-z]', cleaned) and '*' not in cleaned and '☆' not in cleaned:
+        return cleaned
+
     # SPECIAL HANDLING FOR MONTEHIEDRA: Check for exact matches first
     montehiedra_mapping = {
         "*A* Chocolate Chip Nutella ": "A - Chocolate Chip Nutella",
@@ -2704,15 +2732,33 @@ def clean_cookie_name(api_name):
     # If still no match, return cleaned name (will be handled by find_cookie_row fuzzy matching)
     return cleaned
 
+def _extract_letter(name):
+    """Extract the leading letter slot from a name like 'K - Vanilla Coconut Cream' -> 'K'.
+    Returns None if no letter prefix is found."""
+    m = re.match(r'^\s*([A-Za-z])\s*-\s*', name or '')
+    return m.group(1).upper() if m else None
+
+
 def find_cookie_row(cookie_names, api_cookie_name):
-    """Find the row index for a cookie in the sheet using improved matching"""
+    """Find the row index for a cookie in the sheet, enforcing same-letter-slot matching.
+
+    Bug fix (2026-05-10): previous logic would route old-menu items (e.g. *I* Linzer Cake,
+    *K* Strawberry Cheesecake) to current-menu rows via "same flavor / different letter"
+    or substring-keyword matching. That caused a second write to overwrite the correct
+    value (e.g. K - Vanilla Coconut Cream sales of 1 overwriting C - Cookies & Cream's 11
+    because "cream" is a substring of "Cookies & Cream"). The fix: all matching strategies
+    now refuse to cross letter slots. If the Clover letter doesn't appear in the sheet
+    roster, the sale is skipped (correct behavior - means the cookie was retired but POS
+    still has it; team needs to hide it on Clover).
+    """
     # Exclude S:Jalda items - they are not regular cookies
     if 'S:Jalda' in api_cookie_name or 'jalda' in api_cookie_name.lower():
         logging.info(f"🚫 Excluding S:Jalda item from cookie matching: {api_cookie_name}")
         return None
-        
+
     cleaned_api_name = clean_cookie_name(api_cookie_name)
-    
+    api_letter = _extract_letter(cleaned_api_name)
+
     # 1. EXACT MATCH (highest priority)
     for i, cookie in enumerate(cookie_names):
         if not cookie:
@@ -2721,56 +2767,58 @@ def find_cookie_row(cookie_names, api_cookie_name):
             logging.info(f"🎯 Exact match found: '{cleaned_api_name}' -> '{cookie}' at row {i + 3}")
             return i + 3
 
-    # 1b. SAME FLAVOR, DIFFERENT LETTER (e.g. K vs E for Strawberry Cheesecake - store-specific codes)
-    api_flavor = _strip_cookie_prefix(cleaned_api_name) or cleaned_api_name
-    for i, cookie in enumerate(cookie_names):
-        if not cookie:
-            continue
-        sheet_flavor = _strip_cookie_prefix(cookie) or cookie
-        if api_flavor and sheet_flavor and api_flavor.lower() == sheet_flavor.lower():
-            logging.info(f"🎯 Same flavor match (different letter): '{cleaned_api_name}' -> '{cookie}' at row {i + 3}")
+    # If we have a letter prefix, restrict ALL fallbacks to the same letter slot.
+    if api_letter:
+        # Find the sheet row(s) whose letter matches the API letter
+        same_letter_rows = [(i, c) for i, c in enumerate(cookie_names)
+                            if c and _extract_letter(c) == api_letter]
+
+        if not same_letter_rows:
+            # Letter has no slot in this sheet roster - drop the sale (cookie not on menu)
+            logging.info(f"🚫 No '{api_letter}' slot in sheet roster, skipping: '{cleaned_api_name}'")
+            return None
+
+        # 2. FLAVOR MATCH within same letter (normalize & <-> and so Clover's "Black & White"
+        # matches the sheet's "Black and White")
+        def _norm_flavor(s):
+            t = ' '.join((s or '').lower().split())
+            t = t.replace(' & ', ' and ')
+            return t
+        api_flavor = _norm_flavor(_strip_cookie_prefix(cleaned_api_name) or cleaned_api_name)
+        for i, cookie in same_letter_rows:
+            sheet_flavor = _norm_flavor(_strip_cookie_prefix(cookie) or cookie)
+            if api_flavor and sheet_flavor and api_flavor == sheet_flavor:
+                logging.info(f"🎯 Letter+flavor match: '{cleaned_api_name}' -> '{cookie}' at row {i + 3}")
+                return i + 3
+
+        # 3. FUZZY MATCH within same letter (typo tolerance)
+        best_match = None
+        best_score = 0
+        for i, cookie in same_letter_rows:
+            score = calculate_similarity(cleaned_api_name.lower(), cookie.lower())
+            if score > best_score and score >= 0.7:
+                best_score = score
+                best_match = (i, cookie)
+        if best_match:
+            i, cookie = best_match
+            logging.info(f"🎯 Letter+fuzzy match: '{cleaned_api_name}' -> '{cookie}' (score: {best_score:.2f}) at row {i + 3}")
             return i + 3
-    
-    # 2. FUZZY MATCH (using similarity scoring)
-    best_match = None
-    best_score = 0
-    
+
+        # 4. Same letter but no flavor/fuzzy match - the cookie under this letter changed.
+        # Don't write (would corrupt the new cookie's count). Sale is intentionally dropped.
+        logging.info(f"🚫 Letter '{api_letter}' on sheet differs from Clover flavor '{cleaned_api_name}' - skipping (retire on POS to clean up)")
+        return None
+
+    # No letter prefix on API name (rare). Fall back to flavor-only exact match across all rows.
+    api_flavor = (_strip_cookie_prefix(cleaned_api_name) or cleaned_api_name).lower()
     for i, cookie in enumerate(cookie_names):
         if not cookie:
             continue
-        # Calculate similarity score
-        score = calculate_similarity(cleaned_api_name.lower(), cookie.lower())
-        if score > best_score and score >= 0.7:  # 70% similarity threshold
-            best_score = score
-            best_match = (i, cookie)
-    
-    if best_match:
-        i, cookie = best_match
-        logging.info(f"🎯 Fuzzy match found: '{cleaned_api_name}' -> '{cookie}' (score: {best_score:.2f}) at row {i + 3}")
-        return i + 3
-    
-    # 3. LETTER-BASED MATCH (fallback)
-    for i, cookie in enumerate(cookie_names):
-        if not cookie:
-            continue
-        # Check if cookie starts with the same letter and contains key words
-        if (cookie.startswith(cleaned_api_name[0] + " - ") and 
-            any(word in cookie.lower() for word in cleaned_api_name.lower().split() if len(word) > 3)):
-            logging.info(f"🎯 Letter-based match found: '{cleaned_api_name}' -> '{cookie}' at row {i + 2}")
+        sheet_flavor = (_strip_cookie_prefix(cookie) or cookie).lower()
+        if api_flavor and sheet_flavor and api_flavor == sheet_flavor:
+            logging.info(f"🎯 Letterless flavor match: '{cleaned_api_name}' -> '{cookie}' at row {i + 3}")
             return i + 3
-    
-    # 4. KEYWORD MATCH (last resort)
-    for i, cookie in enumerate(cookie_names):
-        if not cookie:
-            continue
-        # Check if cookie contains key words from the API name
-        api_words = [word for word in cleaned_api_name.lower().split() if len(word) > 3]
-        cookie_words = cookie.lower().split()
-        
-        if any(api_word in ' '.join(cookie_words) for api_word in api_words):
-            logging.info(f"🎯 Keyword match found: '{cleaned_api_name}' -> '{cookie}' at row {i + 2}")
-            return i + 3
-    
+
     logging.warning(f"⚠️ No match found for: '{cleaned_api_name}' (original: '{api_cookie_name}')")
     return None
 

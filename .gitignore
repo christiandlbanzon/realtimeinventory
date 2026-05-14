@@ -20,6 +20,8 @@ tmpfile
 .gcloud_temp_config/
 
 # IDE
-.claude/
+# Ignore everything under .claude except skills/ (which carries onboarding docs)
+.claude/*
+!.claude/skills/
 .vscode/
 .idea/
