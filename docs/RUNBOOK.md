@@ -132,3 +132,36 @@ os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
 ```
 
 If the script will be deployed (e.g. to Cloud Run), add it to `.gcloudignore` whitelist (with `!filename.py`) and `Dockerfile` COPY.
+
+---
+
+## 9. Forecast methodology — phased "smart hybrid" (Morning PARs G & H)
+
+As of 5/26/2026, Morning PARs columns **G** (Malls + Website Forecast) and **H** (Sales Trend / VSJ) use a **maturity-phased** statistic instead of a flat median. Decided by the team (Darren spec + Leann's sellout context):
+
+| Phase | Detection | Statistic |
+|---|---|---|
+| **Launch** (brand new, no recent data) | `day_valid == 0` | standard fallback (Darren's table; H uses 48) |
+| **Ramp** (1-3 recent days) | `day_valid` 1-3 | `MAX(yesterday's window, standard)` — uses prev day if it beats standard |
+| **Young** (≥4 recent days, < 4 weeks old) | `day_valid >= 4` AND `num_valid < 4` | `AVERAGE` of last 4 day-windows |
+| **Mature** (≥ 4 weeks) | `num_valid == 4` | `MEDIAN` of the 4 weekly same-weekday windows (original behavior) |
+
+Where:
+- `num_valid` = how many of the 4 weekly same-weekday lookups (7/14/21/28 days back for H; 6/13/20/27 for G) have data
+- `day_valid` = how many of the last 4 daily lookups have data
+- A "window" preserves the existing **2-day-sum convention** (each lookup = that day + the next day), so established cookies don't change scale.
+
+**Why phased:** the team sells out almost daily (0% leftover), so flat MEDIAN systematically under-baked new/hot cookies (e.g. Rocky Road), forcing manual % cranking. New cookies now ramp aggressively (MAX) then settle to AVERAGE, and only mature cookies use the stable MEDIAN. The input % column (J) is untouched — team keeps manual control.
+
+**Rebuild scripts:** `build_hybrid_H.py`, `build_hybrid_G.py` (single-tab test), `propagate_hybrid.py` (all tabs). They extract the existing formula prefix and swap only the statistic tail, so they survive formula tweaks.
+
+**IMPORTANT — LET name gotcha:** never use names like `w1`, `d1`, `wk1` in a Sheets LET — they look like cell references (column W row 1) and throw `#NAME? Argument N of LET is not a valid name`. Use underscored names (`wk_one`, `day_one`, `num_valid`).
+
+### Applying to a new month
+
+New months are created by cloning the whole previous-month file (`clone_mall_pars_next_month.py`, Drive `files.copy`). The clone inherits whatever formulas the source tabs have. **Currently only 5/26→5/31 have the hybrid** — earlier May tabs (5/1→5/25) still use the old median. So when June is created:
+1. Clone the May Morning PARs as usual
+2. Run `propagate_hybrid.py` pointed at the June sheet ID, targeting all June tabs (edit `MORN` and `TARGET_TABS`)
+3. Spot-check a tab for `#NAME?`/`#REF!` errors
+
+Or clone specifically from a hybrid tab (5/26+) if the clone is tab-level.
