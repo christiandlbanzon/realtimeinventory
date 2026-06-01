@@ -165,3 +165,23 @@ New months are created by cloning the whole previous-month file (`clone_mall_par
 3. Spot-check a tab for `#NAME?`/`#REF!` errors
 
 Or clone specifically from a hybrid tab (5/26+) if the clone is tab-level.
+
+---
+
+## 10. Clean carryover after a month clone (Mall PARs)
+
+When a new month's Mall PARs is created via `clone_mall_pars_next_month.py`, the clone copies the **previous month's manual data** into every tab. On future-dated tabs this shows as stale numbers that must be cleared (the team flagged "why is there data" on June).
+
+Three carryover zones (all manual-entry, should be blank on future dates):
+1. **Ending Inventory** columns (top grid, manual count): I, W, AK, AY, BM, BW — rows 3-18. Often hardcoded arithmetic like `=4+12`, `=48+8`.
+2. **CLOSING INVENTORY** section (bottom): per-cookie rows between the `CLOSING INVENTORY` header and its `TOTAL`, cols B-E.
+3. **Cookie Shots** section: the 2 data rows after the `Cookie Shots` header, cols B-F (incl. `(2) 5/2`-style expiration notes).
+
+Run `clean_june_mall_carryover.py` (rename/repoint `JUNE_MALL` to the new month's ID). It:
+- **Detects section positions per tab** (find_row on col A) — do NOT hardcode rows; tabs can be shifted by 1 (6-18 was). This is the off-by-one trap.
+- Clears only **literals and pure-arithmetic hardcodes** — never cell-referencing formulas, headers, col-A labels, or TOTAL rows.
+- Has a `DRY_RUN` flag — always dry-run first and eyeball the cell list before clearing.
+
+Preserved: chain formulas (`=E+G-F-SUM(J:N)`), closing TOTAL (`=sum(B27:B42)`), label formulas (`=A3`), all headers.
+
+NOTE: Morning PARs and Dispatch PARs clones may have analogous carryover — check those too (Dispatch especially has many formulas; verify they survive). Top-grid orange columns (Opening Stock / Live Sales / Expected Live) are updater-managed and read 0 on future dates — leave them.
